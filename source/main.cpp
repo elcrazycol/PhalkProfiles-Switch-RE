@@ -316,7 +316,19 @@ static bool takeValidName(const NacpLanguageEntry* entry, std::string& out)
     if (invalid || name.empty())
         return false;
 
-    out = std::move(name);
+    // Reject control-character garbage (uninitialized NACP entries can contain
+    // arbitrary non-zero bytes) and trim stray whitespace.
+    for (unsigned char c : name) {
+        if (c < 0x20)
+            return false;
+    }
+
+    const size_t first = name.find_first_not_of(" \t");
+    const size_t last = name.find_last_not_of(" \t");
+    if (first == std::string::npos)
+        return false;
+
+    out = name.substr(first, last - first + 1);
     return true;
 }
 
@@ -739,6 +751,91 @@ static bool collect(ExportData& out, std::string& error)
                   });
 
         out.users.push_back(std::move(user));
+    }
+
+    // -------------------------------------------------------------------------
+    // Recovery pass. If the PDM account events were lost, raw sessions have no
+    // user attached. Attribute such titles to the user with the most raw
+    // activity so they are not silently dropped from the export.
+    // -------------------------------------------------------------------------
+    if (!out.users.empty() && !scan.titles.empty()) {
+        std::set<u64> included;
+        for (const UserInfo& user : out.users) {
+            for (const TitleInfo& title : user.titles)
+                included.insert(title.id);
+        }
+
+        std::map<std::string, u64> rawUserWeight;
+        for (const auto& titleEntry : scan.titles) {
+            for (const auto& userEntry : titleEntry.second.users)
+                rawUserWeight[userEntry.first] += userEntry.second.playtimeSeconds + userEntry.second.launches;
+        }
+
+        s32 primary = 0;
+        u64 bestWeight = 0;
+        for (const auto& weightEntry : rawUserWeight) {
+            if (weightEntry.second <= bestWeight)
+                continue;
+            for (s32 i = 0; i < userCount; ++i) {
+                if (out.users[(size_t)i].id == weightEntry.first) {
+                    primary = i;
+                    bestWeight = weightEntry.second;
+                    break;
+                }
+            }
+        }
+
+        UserInfo& primaryUser = out.users[(size_t)primary];
+
+        for (const auto& titleEntry : scan.titles) {
+            const u64 titleId = titleEntry.first;
+            if (included.count(titleId))
+                continue;
+
+            const RawTitleStats& raw = titleEntry.second;
+            if (raw.launches == 0)
+                continue;
+
+            u64 launches = raw.launches;
+            u64 playtime = raw.playtimeSeconds;
+            u64 firstPlayed = raw.firstPlayed;
+            u64 lastPlayed = raw.lastPlayed;
+
+            auto userIt = raw.users.find(primaryUser.id);
+            if (userIt != raw.users.end() &&
+                (userIt->second.launches > 0 || userIt->second.playtimeSeconds > 0)) {
+                launches = userIt->second.launches;
+                playtime = userIt->second.playtimeSeconds;
+                firstPlayed = userIt->second.firstPlayed;
+                lastPlayed = userIt->second.lastPlayed;
+            }
+
+            if (launches == 0)
+                continue;
+
+            auto nameIt = nameCache.find(titleId);
+            if (nameIt == nameCache.end())
+                nameIt = nameCache.emplace(titleId, titleName(titleId)).first;
+
+            TitleInfo title;
+            title.id = titleId;
+            title.name = nameIt->second;
+            title.firstPlayed = firstPlayed;
+            title.lastPlayed = lastPlayed;
+            title.playtime = playtime;
+            title.launches = (u32)launches;
+
+            primaryUser.titles.push_back(std::move(title));
+            included.insert(titleId);
+
+            logMsg("recovered raw title %016llx for user %s",
+                   (unsigned long long)titleId, primaryUser.id.c_str());
+        }
+
+        std::sort(primaryUser.titles.begin(), primaryUser.titles.end(),
+                  [](const TitleInfo& a, const TitleInfo& b) {
+                      return a.lastPlayed > b.lastPlayed;
+                  });
     }
 
     return true;
