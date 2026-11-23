@@ -37,7 +37,9 @@ include $(DEVKITPRO)/libnx/switch_rules
 #   of a homebrew executable (.nro). This is intended to be used for sysmodules.
 #   NACP building is skipped as well.
 #---------------------------------------------------------------------------------
-TARGET		:=	$(notdir $(CURDIR))
+APP_NAME	:=	PhalkProfiles
+TARGET_BASE	:=	$(APP_NAME)
+TARGET		:=	$(TARGET_BASE)
 BUILD		:=	build
 SOURCES		:=	source
 DATA		:=	data
@@ -45,10 +47,13 @@ INCLUDES	:=	include
 ROMFS		:=	romfs
 SYSMODULE	?=	0
 APP_TITLE   :=  Phalk Profiles
-APP_VERSION :=  1.2
+APP_VERSION :=  1.3.0
 APP_AUTHOR  :=  Phalk
 
+# The sysmodule gets its own target name and build directory so the two
+# binaries never overwrite each other's intermediate files.
 ifeq ($(SYSMODULE),1)
+TARGET		:=	$(TARGET_BASE)_sysmodule
 CONFIG_JSON := sysmodule.json
 endif
 
@@ -63,7 +68,7 @@ CFLAGS	:=	-g -Wall -O2 -ffunction-sections \
 
 CFLAGS	+=	$(INCLUDE) -D__SWITCH__
 
-CXXFLAGS	:= $(CFLAGS) -fno-rtti -fno-exceptions
+CXXFLAGS	:= $(CFLAGS) -fno-rtti
 
 ifeq ($(SYSMODULE),1)
 CXXFLAGS	+= -DPHALK_SYSMODULE
@@ -175,10 +180,28 @@ endif
 .PHONY: $(BUILD) clean all sysmodule
 
 #---------------------------------------------------------------------------------
+ifeq ($(SYSMODULE),1)
+
+# Inner sysmodule build: only produce the NSP.
 all: $(BUILD)
 
-sysmodule:
+else
+
+# Build the sysmodule first, then pack it into the NRO's RomFS. The client can
+# therefore always install the exact sysmodule it was built with.
+all: romfs/sysmodule/sysmodule.nsp
+	@[ -d $(BUILD) ] || mkdir -p $(BUILD)
+	@$(MAKE) --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile
+
+romfs/sysmodule/sysmodule.nsp: source/main.cpp sysmodule.json Makefile
+	@echo building sysmodule ...
 	@$(MAKE) --no-print-directory SYSMODULE=1 BUILD=build-sysmodule
+	@mkdir -p $(dir $@)
+	@cp $(TARGET_BASE)_sysmodule.nsp $@
+
+endif
+
+sysmodule: romfs/sysmodule/sysmodule.nsp
 
 $(BUILD):
 	@[ -d $@ ] || mkdir -p $@
@@ -187,15 +210,13 @@ $(BUILD):
 #---------------------------------------------------------------------------------
 clean:
 	@echo clean ...
-ifeq ($(SYSMODULE),1)
-	@rm -fr $(BUILD) $(TARGET).nsp $(TARGET).nso $(TARGET).npdm $(TARGET).elf
-else
-ifeq ($(strip $(APP_JSON)),)
-	@rm -fr $(BUILD) $(TARGET).nro $(TARGET).nacp $(TARGET).elf
-else
-	@rm -fr $(BUILD) $(TARGET).nsp $(TARGET).nso $(TARGET).npdm $(TARGET).elf
-endif
-endif
+	@rm -fr build build-sysmodule \
+		$(TARGET_BASE).nro $(TARGET_BASE).nacp $(TARGET_BASE).elf $(TARGET_BASE).map \
+		$(TARGET_BASE).nsp $(TARGET_BASE).nso $(TARGET_BASE).npdm \
+		$(TARGET_BASE)_sysmodule.nsp $(TARGET_BASE)_sysmodule.nso \
+		$(TARGET_BASE)_sysmodule.npdm $(TARGET_BASE)_sysmodule.elf \
+		$(TARGET_BASE)_sysmodule.map \
+		romfs/sysmodule/sysmodule.nsp
 
 
 #---------------------------------------------------------------------------------
@@ -215,6 +236,12 @@ ifeq ($(strip $(NO_NACP)),)
 $(OUTPUT).nro	:	$(OUTPUT).elf $(OUTPUT).nacp
 else
 $(OUTPUT).nro	:	$(OUTPUT).elf
+endif
+
+# The NRO embeds the sysmodule in its RomFS; repack it when the payload changes.
+ifeq ($(SYSMODULE),1)
+else
+$(OUTPUT).nro	:	$(TOPDIR)/romfs/sysmodule/sysmodule.nsp
 endif
 
 else

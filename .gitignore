@@ -1,0 +1,16 @@
+# macOS
+.DS_Store
+
+# Build outputs
+build/
+build-sysmodule/
+*.elf
+*.map
+*.nro
+*.nacp
+*.nsp
+*.nso
+*.npdm
+
+# Generated sysmodule payload (rebuilt from source/main.cpp + sysmodule.json)
+romfs/sysmodule/sysmodule.nsp

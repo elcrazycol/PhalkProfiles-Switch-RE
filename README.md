@@ -1,72 +1,140 @@
 # Phalk Profiles for Nintendo Switch
 
-[![Switch Homebrew](https://img.shields.io/badge/Platform-Nintendo%20Switch-red.svg?style=flat-square)](https://github.com/devkitPro/libnx)
-[![Language](https://img.shields.io/badge/Language-C%2B%2B-blue.svg?style=flat-square)](https://en.cppreference.com/)
-[![JSON](https://img.shields.io/badge/JSON-nlohmann-orange.svg?style=flat-square)](https://github.com/nlohmann/json)
+Homebrew client for [phalk.net/profiles](https://www.phalk.net/profiles/).
 
-Phalk Profiles is a lightweight Nintendo Switch homebrew client for [phalk.net/profiles](https://www.phalk.net/profiles/).
-
-It exports playtime data for all local profiles, generates a JSON file and uploads it to the user's Phalk Profiles account.
+The application exports the play log of every local Switch profile, writes it as
+JSON and uploads it to your Phalk Profiles account. An optional background
+sysmodule does the same automatically when a game is closed.
 
 ## Requirements
 
 1. A Nintendo Switch running Atmosphère.
-2. An active internet connection.
-3. An account registered at [phalk.net/profiles](https://www.phalk.net/profiles/).
+2. An internet connection.
+3. An account at [phalk.net/profiles](https://www.phalk.net/profiles/).
+4. For building only: devkitPro with `switch-dev` and `switch-tools`.
+
+## Build
+
+```sh
+export DEVKITPRO=/opt/devkitpro
+make
+```
+
+`make` builds both binaries in the correct order:
+
+* `PhalkProfiles.nro` — the interactive client;
+* `PhalkProfiles_sysmodule.nsp` — the background uploader, which is copied into
+  `romfs/sysmodule/sysmodule.nsp` and packed into the NRO's RomFS.
+
+The sysmodule is no longer a pre-built blob: it is compiled from the same
+`source/main.cpp` and configured by `sysmodule.json`.
+
+To build only the sysmodule:
+
+```sh
+make sysmodule
+```
 
 ## Installation
-
-Copy the NRO file to your switch homebrew folder. Example:
 
 ```text
 sdmc:/switch/PhalkProfiles/PhalkProfiles.NRO
 ```
 
-The sysmodule is included inside the NRO's RomFS.
-Launch `PhalkProfiles.NRO` through hbmenu or another homebrew launcher.
+Launch the NRO through hbmenu.
 
-## First-time setup
+> **Title override is recommended.** In applet mode (hbmenu launched from the
+> Album) the process has a much smaller memory budget and fewer services. If
+> anything fails, hold **R** while launching an installed game to open hbmenu in
+> application mode, then start Phalk Profiles from there.
 
-1. Open `PhalkProfiles`.
-2. Select `Set username` and enter your Phalk Profiles username.
-3. Select `Set password` and enter your password.
-4. Select `Export & upload`.
+## Usage
 
-The status header uses these states:
+1. `Set username` — enter your Phalk Profiles username.
+2. `Set password` — enter your password.
+3. `Export & upload` — exports the play data and uploads it.
 
-```text
-[ Status: Ready ]
-[ Status: Uploading ]
-[ Status: Success! ]
-[ Status: Upload failed... ]
-```
+The status line reports the result, and every step is also written to
+`sdmc:/switch/PhalkProfiles/app.log`. `View log` shows the tail of that file.
 
-## Automatic uploads
-The app can also install a sysmodule for automatic data upload.
-After the sysmodule is enabled (you can do it inside the app), Phalk Profiles watches for the current game to close. When the game exits, it exports the latest playtime data and uploads it automatically.
+### Automatic uploads (sysmodule)
 
-- `Install & enable sysmodule` — installs and enables it when it is missing.
-- `Disable & remove sysmodule` — disables and removes it.
+Open the app and select `Install & enable sysmodule` (or `Update sysmodule`
+after upgrading the app), then reboot the console once.
 
-After installing, enabling, disabling or removing the sysmodule, restart Atmosphère for the change to take effect.
-
-## Configuration and exported data
-
-Credentials are stored at:
-
-```text
-sdmc:/config/PhalkProfiles/config.txt
-```
-
-The latest exported JSON is written to:
-
-```text
-sdmc:/switch/PhalkProfiles/export.json
-```
-
-The background sysmodule log is written to:
+The sysmodule watches for the application process to exit, waits for the play
+log to settle, exports the data and uploads it. Its log is written to:
 
 ```text
 sdmc:/switch/PhalkProfiles/sysmodule.log
 ```
 
+`Disable & remove sysmodule` removes the boot flag and the installed payload.
+
+Manual paths used by the installer:
+
+```text
+sdmc:/atmosphere/contents/00FF0000D4A9E73C/exefs.nsp
+sdmc:/atmosphere/contents/00FF0000D4A9E73C/toolbox.json
+sdmc:/atmosphere/contents/00FF0000D4A9E73C/flags/boot2.flag
+```
+
+## Files
+
+| Path | Purpose |
+| --- | --- |
+| `sdmc:/config/PhalkProfiles/config.txt` | username and password (plain text) |
+| `sdmc:/switch/PhalkProfiles/export.json` | latest export |
+| `sdmc:/switch/PhalkProfiles/app.log` | client log |
+| `sdmc:/switch/PhalkProfiles/sysmodule.log` | sysmodule log |
+
+The exported JSON contains `exportString`, `exportTimestamp` and a `users` array
+with `name`, `id` and `titles` (`id`, `name`, `summary.firstPlayed`,
+`summary.lastPlayed`, `summary.playtime`, `summary.launches`).
+
+## Games missing from the export
+
+Nintendo's PDM play log hides some entries from normal queries. The client now
+reads the raw PDM event log as well, so titles with `PlayLogPolicy` 1 (`LogOnly`)
+or 3 (`Closed`), and titles whose per-user statistics are missing, are exported
+from the raw launch/focus/exit events. It also scans all 16 NACP language
+entries and picks the first valid UTF-8 name instead of trusting a single
+(preferred-language) entry.
+
+If games are still missing, run `PDM diagnostics` in the menu. It writes a
+detailed report to:
+
+```text
+sdmc:/switch/PhalkProfiles/pdm_diag.log
+```
+
+The report contains the raw PDM range, every encountered title, the raw policy
+bits, per-user raw playtime, the `pdm:qry` statistics with and without the
+policy-3 flag, account-event UIDs, and the raw NACP language entries.
+
+## Troubleshooting
+
+* **The console shows `2168-0002` when exporting.** That is a crash of the
+  homebrew process. Check `sdmc:/atmosphere/crash_reports/` and
+  `sdmc:/switch/PhalkProfiles/app.log`; the log tells you which step failed.
+* **`Export failed: accountInitialize failed` / `pdmqryInitialize failed`.**
+  The current process is not allowed to use those services (common in applet
+  mode). Use title override mode.
+* **`Upload failed: ...`** — the export file is still written, so you can check
+  the JSON and your credentials. The server is contacted over plain HTTP; see
+  the security note below.
+* **Game names show as `Unknown Game (id)`.** `nsInitialize` or the language
+  service failed; the export itself is still valid.
+
+## Security notes
+
+* Credentials are stored in clear text in `config.txt`.
+* The upload currently uses **plain HTTP** to `phalk.net` (with an IP fallback
+  when DNS is unavailable). Anyone on the network path can see the credentials
+  and the exported data. Do not use public Wi-Fi for this.
+* The sysmodule runs with sysmodule privileges and writes to the SD card. It is
+  built from the sources in this repository; read the code before installing it.
+
+## License
+
+GPLv3 — see `LICENSE`.
