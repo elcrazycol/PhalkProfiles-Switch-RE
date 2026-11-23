@@ -1511,19 +1511,21 @@ static void handleSysmoduleAction(SysmoduleState& state, std::string& status, bo
     std::string error;
 
     if (!state.installed) {
-        if (installSysmodule(error) && setSysmoduleEnabled(true, error)) {
-            status = "Sysmodule installed. Reboot required.";
-            restartRequired = true;
-            logMsg("sysmodule installed");
+        // Copy the payload but leave it disabled: enabling is an explicit,
+        // separate action so a bad build can never start on the next boot.
+        if (installSysmodule(error) && setSysmoduleEnabled(false, error)) {
+            status = "Sysmodule installed but disabled.";
+            logMsg("sysmodule installed (disabled)");
         } else {
             status = "Install failed: " + error;
             logMsg("sysmodule install failed: %s", error.c_str());
         }
     } else if (!state.current) {
-        if (installSysmodule(error) && setSysmoduleEnabled(true, error)) {
-            status = "Sysmodule updated. Reboot required.";
-            restartRequired = true;
-            logMsg("sysmodule updated");
+        // Updating an enabled sysmodule deliberately disables it. The user has
+        // to enable it again after verifying that the build works.
+        if (installSysmodule(error) && setSysmoduleEnabled(false, error)) {
+            status = "Sysmodule updated and disabled.";
+            logMsg("sysmodule updated (disabled)");
         } else {
             status = "Update failed: " + error;
             logMsg("sysmodule update failed: %s", error.c_str());
@@ -1588,11 +1590,11 @@ static std::string askText(const char* guide, bool password)
 static std::string sysmoduleLabel(const SysmoduleState& state)
 {
     if (!state.installed)
-        return "Install & enable sysmodule";
+        return "Install sysmodule (disabled)";
     if (!state.current)
-        return "Update sysmodule";
+        return "Update sysmodule (disables it)";
     if (!state.enabled)
-        return "Enable sysmodule";
+        return "Enable sysmodule (experimental)";
     return "Disable & remove sysmodule";
 }
 
@@ -1907,7 +1909,9 @@ int main()
 extern "C" {
 
 u32 __nx_applet_type = AppletType_None;
-u32 __nx_fs_num_sessions = 8;
+// Keep this low: sysmodules keep their FS sessions for the whole session, and
+// grabbing too many at boot can starve applets (hbmenu/Album) of FS sessions.
+u32 __nx_fs_num_sessions = 1;
 
 void __libnx_initheap(void)
 {
@@ -1945,18 +1949,15 @@ void __appInit(void)
 
     fsdevMountSdmc();
 
-    rc = timeInitialize();
-    if (R_SUCCEEDED(rc))
-        __libnx_init_time();
-    else
-        logMsg("timeInitialize failed (%s)", resultToString(rc).c_str());
+    // The time service is initialized later, only when an upload actually
+    // runs. Holding its sessions from boot is unnecessary and can interfere
+    // with applets on some setups.
 }
 
 void __appExit(void)
 {
     fsdevUnmountAll();
     fsExit();
-    timeExit();
     smExit();
 }
 
@@ -2052,6 +2053,12 @@ static void uploadCurrentProfiles()
         return;
     }
 
+    Result timeRc = timeInitialize();
+    if (R_SUCCEEDED(timeRc))
+        __libnx_init_time();
+    else
+        logMsg("timeInitialize failed (%s)", resultToString(timeRc).c_str());
+
     try {
         runExportAndUpload(cfg);
     } catch (const std::exception& exception) {
@@ -2060,6 +2067,9 @@ static void uploadCurrentProfiles()
         logMsg("unhandled unknown exception during export/upload");
     }
 
+    if (R_SUCCEEDED(timeRc))
+        timeExit();
+
     socketExit();
     if (nifmReady)
         nifmExit();
@@ -2067,6 +2077,10 @@ static void uploadCurrentProfiles()
 
 int main()
 {
+    // Let the home menu and system services finish booting before touching
+    // pgl/PDM. This also keeps a broken/slow SD card from stalling the boot.
+    svcSleepThread(5'000'000'000ULL);
+
     ensureDataDir();
     logMsg("sysmodule started");
 

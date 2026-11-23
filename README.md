@@ -57,10 +57,12 @@ Launch the NRO through hbmenu.
 The status line reports the result, and every step is also written to
 `sdmc:/switch/PhalkProfiles/app.log`. `View log` shows the tail of that file.
 
-### Automatic uploads (sysmodule)
+### Automatic uploads (sysmodule, experimental)
 
-Open the app and select `Install & enable sysmodule` (or `Update sysmodule`
-after upgrading the app), then reboot the console once.
+The app installs the sysmodule **disabled**. Enabling it is a separate, explicit
+step (`Enable sysmodule (experimental)`) and requires one reboot. Updating an
+installed sysmodule also disables it again, so a new build can never start
+silently on the next boot.
 
 The sysmodule watches for the application process to exit, waits for the play
 log to settle, exports the data and uploads it. Its log is written to:
@@ -70,6 +72,18 @@ sdmc:/switch/PhalkProfiles/sysmodule.log
 ```
 
 `Disable & remove sysmodule` removes the boot flag and the installed payload.
+
+> **If Album/hbmenu hangs after enabling the sysmodule:** power off, mount the
+> SD card on a PC (or use Hekate → Tools → USB Mass Storage), and delete:
+>
+> ```text
+> sdmc:/atmosphere/contents/00FF0000D4A9E73C
+> ```
+>
+> That only removes the sysmodule; it does not touch saves or the app. If you
+> are unsure which sysmodule is at fault, rename `atmosphere/contents` to
+> `atmosphere/contents.off`, boot once without any sysmodule, then add folders
+> back one by one.
 
 Manual paths used by the installer:
 
