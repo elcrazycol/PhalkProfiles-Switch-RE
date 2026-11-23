@@ -111,9 +111,20 @@ with `name`, `id` and `titles` (`id`, `name`, `summary.firstPlayed`,
 Nintendo's PDM play log hides some entries from normal queries. The client now
 reads the raw PDM event log as well, so titles with `PlayLogPolicy` 1 (`LogOnly`)
 or 3 (`Closed`), and titles whose per-user statistics are missing, are exported
-from the raw launch/focus/exit events. It also scans all 16 NACP language
-entries and picks the first valid UTF-8 name instead of trusting a single
-(preferred-language) entry.
+from the raw launch/focus/exit events. If the statistics database is stale, the
+larger of the statistics value and the raw-log value is used for playtime and
+launches.
+
+Title names are read from every NACP language entry, and compressed NACP title
+tables (`TitlesDataFormat` 1, used by newer games) are inflated with
+`source/puff.c` (puff, Copyright (C) 2002-2013 Mark Adler, zlib license).
+
+### Duplicate entries on the website
+
+phalk.net keeps a game row per imported name. Renaming a game (for example from
+`?`/`UNKNOWN GAME (id)` to its real title) can leave the old row behind. After
+the first upload with the fixed names, delete the stale rows on the website
+once; subsequent uploads keep using the stable name.
 
 If games are still missing, run `PDM diagnostics` in the menu. It writes a
 detailed report to:

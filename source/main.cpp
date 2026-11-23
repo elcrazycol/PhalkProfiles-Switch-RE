@@ -43,6 +43,10 @@
 #include <netdb.h>
 #include <unistd.h>
 
+extern "C" {
+#include "puff.h"
+}
+
 #define PHALK_VERSION "1.3.0"
 
 #define CONFIG_DIR "/config/PhalkProfiles"
@@ -332,6 +336,42 @@ static bool takeValidName(const NacpLanguageEntry* entry, std::string& out)
     return true;
 }
 
+static bool takeValidNameFrom(const u8* base, size_t count, std::string& out)
+{
+    for (size_t i = 0; i < count; ++i) {
+        const NacpLanguageEntry* entry = reinterpret_cast<const NacpLanguageEntry*>(
+            base + i * sizeof(NacpLanguageEntry));
+        if (takeValidName(entry, out))
+            return true;
+    }
+    return false;
+}
+
+// Newer SDKs can store the language table as raw DEFLATE (TitlesDataFormat 1):
+// a u16 compressed size followed by the stream, which decompresses to
+// NacpLanguageEntry[32].
+static bool inflateNacpLanguage(const u8* nacp, std::string& out)
+{
+    const u16 compressedSize = (u16)nacp[0] | ((u16)nacp[1] << 8);
+    if (compressedSize == 0 || (size_t)compressedSize + 2 > 0x3000)
+        return false;
+
+    static u8 uncompressed[sizeof(NacpLanguageEntry) * 32];
+
+    unsigned long destLen = sizeof(uncompressed);
+    unsigned long srcLen = compressedSize;
+    if (puff(uncompressed, &destLen, nacp + 2, &srcLen) != 0)
+        return false;
+    if (destLen < sizeof(NacpLanguageEntry))
+        return false;
+
+    size_t count = destLen / sizeof(NacpLanguageEntry);
+    if (count > 32)
+        count = 32;
+
+    return takeValidNameFrom(uncompressed, count, out);
+}
+
 // Reads the title name from NACP. The system language entry can contain
 // garbage (or a language the title simply did not fill in), so every language
 // entry is validated and the first usable UTF-8 name wins.
@@ -359,12 +399,17 @@ static std::string titleName(u64 titleId)
     // NacpLanguageEntry lang[16] is at offset 0 in both old and new libnx
     // layouts (newer libnx wraps it in a union).
     const u8* languageBase = reinterpret_cast<const u8*>(&g_controlData.nacp);
-    for (int i = 0; i < 16; ++i) {
-        const NacpLanguageEntry* entry = reinterpret_cast<const NacpLanguageEntry*>(
-            languageBase + (size_t)i * sizeof(NacpLanguageEntry));
-        if (takeValidName(entry, name))
-            return name;
-    }
+    const u8 titlesDataFormat = languageBase[0x3215];
+
+    if (titlesDataFormat == 1 && inflateNacpLanguage(languageBase, name))
+        return name;
+
+    if (takeValidNameFrom(languageBase, 16, name))
+        return name;
+
+    // Some titles use the compressed table without the format byte being set.
+    if (titlesDataFormat != 1 && inflateNacpLanguage(languageBase, name))
+        return name;
 
     return fallbackName(titleId);
 }
@@ -705,36 +750,50 @@ static bool collect(ExportData& out, std::string& error)
                 }
             }
 
-            TitleInfo title;
-            bool haveTitle = false;
+            u64 firstPlayed = 0;
+            u64 lastPlayed = 0;
+            u64 playtimeSeconds = 0;
+            u64 launches = 0;
 
             if (haveStats) {
-                title.id = titleId;
-                title.firstPlayed = stats.first_timestamp_user;
-                title.lastPlayed = stats.last_timestamp_user;
-                title.playtime = stats.playtime / 1000000000ULL; // ns -> seconds
-                title.launches = stats.total_launches;
-                haveTitle = true;
-            } else {
-                auto titleIt = scan.titles.find(titleId);
-                if (titleIt != scan.titles.end()) {
-                    auto userIt = titleIt->second.users.find(userUid);
-                    if (userIt != titleIt->second.users.end()) {
-                        const RawUserStats& raw = userIt->second;
-                        if (raw.launches > 0 || raw.playtimeSeconds > 0) {
-                            title.id = titleId;
-                            title.firstPlayed = raw.firstPlayed;
-                            title.lastPlayed = raw.lastPlayed;
-                            title.playtime = raw.playtimeSeconds;
-                            title.launches = (u32)raw.launches;
-                            haveTitle = true;
-                        }
-                    }
-                }
+                firstPlayed = stats.first_timestamp_user;
+                lastPlayed = stats.last_timestamp_user;
+                playtimeSeconds = stats.playtime / 1000000000ULL; // ns -> seconds
+                launches = stats.total_launches;
             }
 
-            if (!haveTitle)
+            const RawUserStats* raw = nullptr;
+            auto titleIt = scan.titles.find(titleId);
+            if (titleIt != scan.titles.end()) {
+                auto userIt = titleIt->second.users.find(userUid);
+                if (userIt != titleIt->second.users.end())
+                    raw = &userIt->second;
+            }
+
+            if (raw != nullptr) {
+                // The statistics database on some consoles is stale/incomplete
+                // while the raw event log still has the full history. Keep the
+                // larger values instead of preferring one source blindly.
+                if (raw->launches > launches)
+                    launches = raw->launches;
+                if (raw->playtimeSeconds > playtimeSeconds)
+                    playtimeSeconds = raw->playtimeSeconds;
+                if (raw->firstPlayed != 0 &&
+                    (firstPlayed == 0 || raw->firstPlayed < firstPlayed))
+                    firstPlayed = raw->firstPlayed;
+                if (raw->lastPlayed > lastPlayed)
+                    lastPlayed = raw->lastPlayed;
+            }
+
+            if (launches == 0 && playtimeSeconds == 0)
                 continue;
+
+            TitleInfo title;
+            title.id = titleId;
+            title.firstPlayed = firstPlayed;
+            title.lastPlayed = lastPlayed;
+            title.playtime = playtimeSeconds;
+            title.launches = (u32)launches;
 
             auto it = nameCache.find(titleId);
             if (it == nameCache.end())
@@ -1007,14 +1066,19 @@ static bool runDiagnostics(std::string& error)
         u64 outSize = 0;
         Result nacpRc = nsGetApplicationControlData(NsApplicationControlSource_Storage, title.id,
                                                     &g_controlData, sizeof(g_controlData), &outSize);
-        out("  nacp: %s outSize=%llu playLogPolicy=%u",
+        const u8* languageBase = reinterpret_cast<const u8*>(&g_controlData.nacp);
+        const u8 titlesDataFormat = languageBase[0x3215];
+        const u16 compressedSize = (u16)languageBase[0] | ((u16)languageBase[1] << 8);
+
+        out("  nacp: %s outSize=%llu playLogPolicy=%u titlesDataFormat=%u compressedSize=%u",
             resultToString(nacpRc).c_str(),
             (unsigned long long)outSize,
-            (unsigned)g_controlData.nacp.play_log_policy);
+            (unsigned)g_controlData.nacp.play_log_policy,
+            (unsigned)titlesDataFormat,
+            (unsigned)compressedSize);
         if (R_FAILED(nacpRc))
             continue;
 
-        const u8* languageBase = reinterpret_cast<const u8*>(&g_controlData.nacp);
         for (int lang = 0; lang < 16; ++lang) {
             const NacpLanguageEntry* langEntry = reinterpret_cast<const NacpLanguageEntry*>(
                 languageBase + (size_t)lang * sizeof(NacpLanguageEntry));
